@@ -46,6 +46,40 @@ private struct FixedTokenizer: Tokenizer {
     }
 }
 
+/// Encodes `<image>` as one token so tests can count image tokens.
+private struct ImageTokenTokenizer: Tokenizer {
+    let imageTokenId = 777
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        text.components(separatedBy: "<image>").enumerated().flatMap { index, part in
+            (index == 0 ? [] : [imageTokenId]) + part.unicodeScalars.map { _ in 1 }
+        }
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        "<|start_of_role|>user<|end_of_role|><image>Convert this page.<|end_of_text|>"
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        token == "<image>" ? imageTokenId : nil
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        id == imageTokenId ? "<image>" : nil
+    }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        [1, 2, 3]
+    }
+}
+
 private func smolProcessorConfig(
     imageSequenceLength: Int? = 4,
     maxFrames: Int = 3,
@@ -301,5 +335,61 @@ final class VLMProcessorTests: XCTestCase {
 
         XCTAssertEqual(grid.h * config.patchSize, 2604)
         XCTAssertEqual(grid.w * config.patchSize, 1820)
+    }
+
+    func testIdefics3ProcessorSplitsImagesIntoTilesWithImageTokensPerTile() async throws {
+        let config = try JSONDecoder().decode(
+            Idefics3ProcessorConfiguration.self,
+            from: Data(
+                """
+                {
+                  "image_mean": [0.5, 0.5, 0.5],
+                  "image_std": [0.5, 0.5, 0.5],
+                  "size": { "longest_edge": 16 },
+                  "max_image_size": { "longest_edge": 8 },
+                  "image_seq_len": 4
+                }
+                """.utf8))
+        let processor = Idefics3Processor(config, tokenizer: ImageTokenTokenizer())
+
+        let input = try await processor.prepare(
+            input: UserInput(prompt: "Convert this page.", images: [.ciImage(testImage(edge: 16))]))
+
+        // A 2 x 2 grid of 8 px tiles plus the global image, each with 4 image tokens.
+        let pixels = try XCTUnwrap(input.image?.pixels)
+        XCTAssertEqual(pixels.shape, [5, 8, 8, 3])
+        let tokens = input.text.tokens.asArray(Int.self)
+        XCTAssertEqual(tokens.filter { $0 == 777 }.count, 5 * 4)
+    }
+
+    func testProcessorConfigSuppliesKeysMissingFromPreprocessorConfig() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(component: "VLMProcessorTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(
+            """
+            {
+              "image_mean": [0.5, 0.5, 0.5],
+              "image_std": [0.5, 0.5, 0.5],
+              "max_image_size": { "longest_edge": 512 },
+              "processor_class": "Idefics3Processor",
+              "size": { "longest_edge": 2048 }
+            }
+            """.utf8
+        ).write(to: directory.appending(component: "preprocessor_config.json"))
+        try Data(
+            """
+            { "image_seq_len": 64, "processor_class": "SmolVLMProcessor" }
+            """.utf8
+        ).write(to: directory.appending(component: "processor_config.json"))
+
+        let loaded = try await loadProcessorConfig(from: directory)
+        let config = try JSONDecoder().decode(
+            Idefics3ProcessorConfiguration.self, from: loaded.data)
+
+        XCTAssertEqual(loaded.processorType, "Idefics3Processor")
+        XCTAssertEqual(config.imageSequenceLength, 64)
+        XCTAssertEqual(config.maxImageSize?.longestEdge, 512)
     }
 }

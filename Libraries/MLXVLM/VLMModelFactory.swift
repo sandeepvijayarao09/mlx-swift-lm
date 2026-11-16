@@ -595,7 +595,11 @@ func loadProcessorConfig(
     let preprocessorConfigURL = modelDirectory.appending(component: "preprocessor_config.json")
 
     if FileManager.default.fileExists(atPath: preprocessorConfigURL.path) {
-        return try readProcessorConfig(from: preprocessorConfigURL)
+        let preprocessor = try readProcessorConfig(from: preprocessorConfigURL)
+        guard FileManager.default.fileExists(atPath: processorConfigURL.path) else {
+            return preprocessor
+        }
+        return merging(preprocessor, withMissingKeysFrom: processorConfigURL)
     }
     if FileManager.default.fileExists(atPath: processorConfigURL.path) {
         return try readProcessorConfig(from: processorConfigURL)
@@ -632,6 +636,30 @@ private func missingProcessorTypeError(filename: String) -> ProcessorConfigError
                 debugDescription:
                     "No processor_class was declared and no processor loading resolver supplied one."
             )))
+}
+
+/// Adds keys that only `processor_config.json` sets, such as `image_seq_len`.
+/// Keys in `preprocessor_config.json` win.
+private func merging(
+    _ preprocessor: LoadedVLMProcessorConfiguration, withMissingKeysFrom url: URL
+) -> LoadedVLMProcessorConfiguration {
+    guard let processor = try? readProcessorConfig(from: url),
+        var merged = try? JSONSerialization.jsonObject(with: preprocessor.data)
+            as? [String: Any],
+        let extra = try? JSONSerialization.jsonObject(with: processor.data) as? [String: Any]
+    else {
+        return preprocessor
+    }
+    let missing = extra.filter { merged[$0.key] == nil }
+    guard !missing.isEmpty else { return preprocessor }
+    merged.merge(missing) { current, _ in current }
+    guard let data = try? JSONSerialization.data(withJSONObject: merged) else {
+        return preprocessor
+    }
+    return LoadedVLMProcessorConfiguration(
+        data: data,
+        processorType: preprocessor.processorType ?? processor.processorType,
+        filename: preprocessor.filename)
 }
 
 private func readProcessorConfig(from url: URL) throws -> LoadedVLMProcessorConfiguration {

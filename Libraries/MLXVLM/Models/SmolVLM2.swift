@@ -147,7 +147,7 @@ public struct SmolVLMProcessor: UserInputProcessor {
     private let config: SmolVLMProcessorConfiguration
     private let tokenizer: any Tokenizer
 
-    private let fallbackImageTokenId = 49190
+    private let fallbackImageTokenId: Int
     let imageToken = "<image>"
     let fakeImageToken = "<fake_token_around_image>"
     let globalImageToken = "<global-img>"
@@ -170,8 +170,17 @@ public struct SmolVLMProcessor: UserInputProcessor {
         _ config: SmolVLMProcessorConfiguration,
         tokenizer: any Tokenizer
     ) {
+        self.init(config, tokenizer: tokenizer, fallbackImageTokenId: 49190)
+    }
+
+    init(
+        _ config: SmolVLMProcessorConfiguration,
+        tokenizer: any Tokenizer,
+        fallbackImageTokenId: Int
+    ) {
         self.config = config
         self.tokenizer = tokenizer
+        self.fallbackImageTokenId = fallbackImageTokenId
     }
 
     static func resolvedImageTokenId(

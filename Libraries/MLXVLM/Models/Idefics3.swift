@@ -799,7 +799,6 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
     }
 }
 
-// MARK: - Processor Configuration
 public struct Idefics3ProcessorConfiguration: Codable, Sendable {
     public struct Size: Codable, Sendable {
         public let longestEdge: Int
@@ -811,6 +810,10 @@ public struct Idefics3ProcessorConfiguration: Codable, Sendable {
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
     public let size: Size
+    /// Tile size. Defaults to 364, as in `Idefics3ImageProcessor`.
+    public let maxImageSize: Size?
+    /// Tokens per tile, usually read from `processor_config.json`. Defaults to 169, as in
+    /// `Idefics3Processor`.
     public let imageSequenceLength: Int?
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
@@ -824,101 +827,37 @@ public struct Idefics3ProcessorConfiguration: Codable, Sendable {
         case imageMean = "image_mean"
         case imageStd = "image_std"
         case size
+        case maxImageSize = "max_image_size"
         case imageSequenceLength = "image_seq_len"
     }
 }
 
 // MARK: - Processor
 
+/// Idefics3 checkpoints (SmolVLM, granite-docling) use the same image splitting and prompt
+/// format as SmolVLM2, so this delegates to ``SmolVLMProcessor``.
 public struct Idefics3Processor: UserInputProcessor {
-    private let config: Idefics3ProcessorConfiguration
-    private let tokenizer: any Tokenizer
-    private let fixedImageSize = 384
-
-    // From the Python code and default config, we know image_token_id is usually 49153.
-    // Hardcode this since we can't pass it in or rely on it from the processor config.
-    private let imageTokenId = 49153
+    private let processor: SmolVLMProcessor
 
     public init(
         _ config: Idefics3ProcessorConfiguration,
         tokenizer: any Tokenizer
     ) {
-        self.config = config
-        self.tokenizer = tokenizer
+        let smolConfig = SmolVLMProcessorConfiguration(
+            imageMean: config.imageMean,
+            imageStd: config.imageStd,
+            size: .init(longestEdge: config.size.longestEdge),
+            maxImageSize: .init(longestEdge: config.maxImageSize?.longestEdge ?? 364),
+            videoSampling: .init(fps: 1, maxFrames: 1),
+            imageSequenceLength: config.imageSequenceLength ?? 169)
+        self.processor = SmolVLMProcessor(
+            smolConfig, tokenizer: tokenizer, fallbackImageTokenId: 49153)
     }
 
-    private func prompt(from userInput: UserInput) -> String {
-        switch userInput.prompt {
-        case .text(let text):
-            text
-        case .messages(let messages):
-            messages.last?["content"] as? String ?? ""
-        case .chat(let messages):
-            messages.last?.content ?? ""
+    public func prepare(input: UserInput) async throws -> LMInput {
+        guard input.videos.isEmpty else {
+            throw VLMError.processing("Idefics3 models do not accept video input.")
         }
-    }
-
-    public func prepare(input: UserInput) throws -> LMInput {
-        let prompt = prompt(from: input)
-        if input.images.isEmpty {
-            // No image scenario
-            let tokens = tokenizer.encode(text: prompt)
-            let tokensArray = MLXArray(tokens).expandedDimensions(axis: 0)
-            let mask = ones(like: tokensArray)
-            return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
-        } else {
-            // Single image scenario
-            guard input.images.count == 1 else {
-                throw VLMError.singleImageAllowed
-            }
-
-            // Encode only the text part of the prompt, without <image>
-            var promptTokens = tokenizer.encode(text: prompt)
-
-            let imageTokenIndex = promptTokens.count / 2
-            promptTokens.insert(imageTokenId, at: imageTokenIndex)
-
-            let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
-
-            var image = try input.images[0].asCIImage()
-            image = MediaProcessing.inSRGBToneCurveSpace(image)
-            let targetSize = CGSize(
-                width: fixedImageSize,
-                height: fixedImageSize
-            )
-            image = MediaProcessing.apply(image, processing: input.processing)
-            image = MediaProcessing.resampleBicubic(image, to: targetSize)
-            image = MediaProcessing.normalize(
-                image,
-                mean: config.imageMeanTuple,
-                std: config.imageStdTuple
-            )
-            var pixels = MediaProcessing.asMLXArray(image)
-
-            if pixels.ndim == 2 {
-                pixels = pixels.expandedDimensions(axis: -1)
-            }
-
-            if pixels.ndim == 3 {
-                pixels = pixels.expandedDimensions(axis: 0)
-            }
-
-            // If shape is (B,C,H,W), transpose to (B,H,W,C)
-            if pixels
-                .dim(1) == 3
-                && pixels
-                    .dim(2) == fixedImageSize
-                && pixels
-                    .dim(3) == fixedImageSize
-            {
-                pixels = pixels.transposed(0, 2, 3, 1)
-            }
-
-            return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
-                image: .init(pixels: pixels)
-            )
-        }
+        return try await processor.prepare(input: input)
     }
 }
