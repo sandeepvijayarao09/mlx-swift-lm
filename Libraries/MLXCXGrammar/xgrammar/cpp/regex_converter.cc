@@ -15,6 +15,17 @@
 
 namespace xgrammar {
 
+/*! \brief The class body matched by \s. The regex dialect is ECMAScript, where \s is WhiteSpace
+ * (TAB, VT, FF, ZWNBSP and every Space_Separator code point) plus LineTerminator (LF, CR, LS, PS).
+ * Unlike \d and \w, it is not ASCII-only. */
+constexpr const char* kWhitespaceClassBody =
+    R"(\f\n\r\t\v\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff)";
+
+/*! \brief The complement of kWhitespaceClassBody over the whole codepoint range, for \S. */
+constexpr const char* kNonWhitespaceClassBody =
+    R"(\x00-\x08\x0E-\x1F\x21-\x9F\xA1-\u167f\u1681-\u1fff\u200b-\u2027\u202a-\u202e)"
+    R"(\u2030-\u205e\u2060-\u2fff\u3001-\ufefe\uff00-\U0010FFFF)";
+
 /*!
  * \brief Convert a regex to EBNF.
  * \details The implementation refers to the regex described in
@@ -24,6 +35,14 @@ class RegexConverter {
  public:
   explicit RegexConverter(const std::string& regex) : regex_(regex) {
     if (!regex.empty()) {
+      // ParseUTF8 takes a C string and stops at the first NUL, so a regex
+      // containing one would either yield an empty codepoint vector (leading
+      // NUL -- an out-of-bounds read below) or be silently truncated to the
+      // prefix. A NUL is never meaningful in a regex, so reject it here.
+      if (regex.find('\0') != std::string::npos) {
+        XGRAMMAR_LOG(FATAL) << "The regex must not contain null characters.";
+        XGRAMMAR_UNREACHABLE();
+      }
       regex_codepoints_ = ParseUTF8(regex_.c_str(), false);
       if (regex_codepoints_[0] == kInvalidUTF8) {
         XGRAMMAR_LOG(FATAL) << "The regex is not a valid UTF-8 string.";
@@ -205,10 +224,10 @@ std::string RegexConverter::HandleEscapeInCharClass() {
     return R"(\x00-\x2F\x3A-\x40\x5B-\x5E\x60\x7B-\U0010FFFF)";
   } else if (current_[1] == 's') {
     current_ += 2;
-    return R"(\f\n\r\t\v\u0020\u00a0)";
+    return kWhitespaceClassBody;
   } else if (current_[1] == 'S') {
     current_ += 2;
-    return R"(\x00-\x08\x0E-\x1F\x21-\x9F\xA1-\U0010FFFF)";
+    return kNonWhitespaceClassBody;
   } else {
     auto res = HandleCharEscape();
     if (res == "]" || res == "-") {
@@ -244,10 +263,10 @@ std::string RegexConverter::HandleEscape() {
     return "[^a-zA-Z0-9_]";
   } else if (current_[1] == 's') {
     current_ += 2;
-    return R"([\f\n\r\t\v\u0020\u00a0])";
+    return std::string("[") + kWhitespaceClassBody + "]";
   } else if (current_[1] == 'S') {
     current_ += 2;
-    return R"([^[\f\n\r\t\v\u0020\u00a0])";
+    return std::string("[^") + kWhitespaceClassBody + "]";
   } else if ((current_[1] >= '1' && current_[1] <= '9') || current_[1] == 'k') {
     RaiseError("Backreference is not supported yet.");
   } else if (current_[1] == 'p' || current_[1] == 'P') {
@@ -326,8 +345,8 @@ std::string RegexConverter::Convert() {
       if (parenthesis_level_ == 0) {
         RaiseError("Unmatched ')'");
       }
-      // Special case: if the previous character is '|', add an empty string to the result.
-      if (current_ != start_ && current_[-1] == '|') {
+      // Empty alternative before ')' (e.g. "(a|)" or "(a|$)"): emit "" so it isn't a bare '|'.
+      if (!result_ebnf_.empty() && result_ebnf_.back() == '|') {
         AddEBNFSegment("\"\"");
       }
       --parenthesis_level_;
@@ -359,6 +378,11 @@ std::string RegexConverter::Convert() {
       }
     } else if (*current_ == '|') {
       is_empty = false;
+      // Empty alternative before '|': emit "" so there's no bare '|' on the left.
+      // Covers leading ("^$|abc"), consecutive ("a||b") and group-start ("(|a)") cases.
+      if (result_ebnf_.empty() || result_ebnf_.back() == '|' || result_ebnf_.back() == '(') {
+        AddEBNFSegment("\"\"");
+      }
       AddEBNFSegment("|");
       ++current_;
     } else if (*current_ == '\\') {
@@ -377,6 +401,10 @@ std::string RegexConverter::Convert() {
   }
   if (parenthesis_level_ != 0) {
     RaiseError("The parenthesis is not closed.");
+  }
+  // Trailing empty alternative, e.g. "abc|": emit "" so it doesn't end with a bare '|'.
+  if (!result_ebnf_.empty() && result_ebnf_.back() == '|') {
+    AddEBNFSegment("\"\"");
   }
   if (is_empty) {
     AddEBNFSegment("\"\"");

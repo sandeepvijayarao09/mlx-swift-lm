@@ -63,12 +63,14 @@ class GrammarCompiler {
    * \param max_threads The maximum number of threads to use for compiling grammars.
    * \param cache_enabled Whether to enable the cache.
    * \param max_memory_bytes The maximum memory usage in bytes.
+   * \param enable_dynamic_compilation Whether to generate token mask cache entries on demand.
    */
   GrammarCompiler(
       const TokenizerInfo& tokenizer_info,
       int max_threads = 8,
       bool cache_enabled = true,
-      int64_t max_memory_bytes = -1  // unlimited
+      int64_t max_memory_bytes = -1,  // unlimited
+      bool enable_dynamic_compilation = false
   );
 
   /*! \brief Get the compiled grammar for a JSON schema string. */
@@ -78,11 +80,21 @@ class GrammarCompiler {
       std::optional<int> indent = std::nullopt,
       std::optional<std::pair<std::string, std::string>> separators = std::nullopt,
       bool strict_mode = true,
-      std::optional<int> max_whitespace_cnt = std::nullopt
+      std::optional<int> max_whitespace_cnt = std::nullopt,
+      bool any_order = false
   );
 
   /*! \brief Get the compiled grammar for pure JSON. */
   CompiledGrammar CompileBuiltinJSONGrammar();
+
+  /*!
+   * \brief Get the compiled grammar for a Lark grammar string.
+   * \param lark_string The Lark grammar. The root rule must be named "start".
+   * \param named_grammars Grammar objects or Lark sources that can be referenced with `@name`.
+   */
+  CompiledGrammar CompileLark(
+      const std::string& lark_string, const std::vector<NamedGrammar>& named_grammars = {}
+  );
 
   /*! \brief Get the compiled grammar for a grammar. */
   CompiledGrammar CompileGrammar(const Grammar& grammar);
